@@ -62,8 +62,12 @@
 /* The BC conversion budget (server_emu_bcn.c), off by default since v0.5.5: walking Firelink ->
  * High Wall, DS3 streams BC textures in and their transcodes froze 300-1000 ms on the G925 (GPU 98%
  * in compute); the budget decodes the ones over it instead. Off elsewhere: in Stray it decoded
- * 511 MB of textures and its mixed copies were skipped (sky and water; fixed by the copy fix,
+ * 511 MB of textures and their mixed copies were skipped (sky and water; fixed by the copy fix,
  * a fix of the copy itself), and only a same-spot A/B shows what the decoded textures cost a GPU-bound
  * game. The S10+'s DS3 A/B ran with the old per-second budget. */
 {"374320", "Mali-G925,Mali-G720", "VKBRIDGE_BC_TX_BUDGET=32:4",
  "DARK SOULS III: BC transcodes froze 300-1000 ms while walking (G925); the conversion budget spreads them out"},
+/* Hob (Runic Games, Steam 404680): area transitions stream BC textures and can freeze while they transcode
+ * on Mali-G720 (POCO X8 Pro); the conversion budget spreads the transcodes out, similar to DS3. */
+{"404680", "Mali-G720", "VKBRIDGE_BC_TX_BUDGET=32:4",
+ "Hob: BC transcodes during area-transition texture streaming can freeze (Mali-G720); the conversion budget spreads them out"},
