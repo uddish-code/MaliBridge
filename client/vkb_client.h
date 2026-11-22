@@ -69,6 +69,10 @@ typedef struct vkb_physdev {
     vkb_mem_type_map type_map[VK_MAX_MEMORY_TYPES];
     int readback_type;                              /* server type for the client's own cached frame readback; -1: none */
     uint32_t heap_map[VK_MAX_MEMORY_HEAPS];         /* client heap -> server heap */
+    VkDeviceSize mem_budget_srv[VK_MAX_MEMORY_HEAPS]; /* cached memory budget reply (server heap order) */
+    VkDeviceSize mem_usage_srv[VK_MAX_MEMORY_HEAPS];
+    uint64_t mem_budget_ns;
+    int mem_budget_have;
     VkExtensionProperties *exts;                    /* filtered device extensions */
     uint32_t next;
     uint32_t aliased;                               /* vkb_ext_aliases[i] offered under the app name: bit i */

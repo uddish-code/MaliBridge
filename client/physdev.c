@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 const char *const *vkb_client_device_exts(uint32_t *n);
 
@@ -487,6 +488,8 @@ int vkb_physdev_ready(vkb_physdev *pd)
     free(srv);
     VKB_INFO("%s: %u extensions offered, memory sharing %s, emulation 0x%x", pd->props.deviceName, pd->next,
              vkb_mem_strategy_name(pd->info.strategy), pd->info.emu);
+    pd->mem_budget_have = 0;
+    pd->mem_budget_ns = 0;
     pd->ready = 1;
     pthread_mutex_unlock(&pd->lock);
     return 1;
@@ -585,13 +588,69 @@ VKAPI_ATTR void VKAPI_CALL vkb_ep_vkGetPhysicalDeviceMemoryProperties(VkPhysical
     *pMemoryProperties = pd->client_mem;
 }
 
+static uint64_t vkb_physdev_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void vkb_physdev_apply_mem_budget(vkb_physdev *pd, VkPhysicalDeviceMemoryBudgetPropertiesEXT *budget,
+                                         const VkDeviceSize b[VK_MAX_MEMORY_HEAPS], const VkDeviceSize u[VK_MAX_MEMORY_HEAPS])
+{
+    memset(budget->heapBudget, 0, sizeof(budget->heapBudget));
+    memset(budget->heapUsage, 0, sizeof(budget->heapUsage));
+    for (uint32_t h = 0; h < pd->client_mem.memoryHeapCount; h++) {
+        budget->heapBudget[h] = b[pd->heap_map[h]];
+        budget->heapUsage[h] = u[pd->heap_map[h]];
+        /* never more than the heap the app is shown (VKBRIDGE_HEAP_MAX_MB); the usage stays
+         * the real one, so over the cap reads as over budget */
+        if (budget->heapBudget[h] > pd->client_mem.memoryHeaps[h].size) budget->heapBudget[h] = pd->client_mem.memoryHeaps[h].size;
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL vkb_ep_vkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
                                                                        VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
 {
     vkb_physdev *pd = vkb_pd(physicalDevice);
     VkPhysicalDeviceMemoryBudgetPropertiesEXT *budget = NULL;
-    for (VkBaseOutStructure *b = (VkBaseOutStructure *)pMemoryProperties->pNext; b; b = b->pNext)
+    int only_budget = 1;
+    for (VkBaseOutStructure *b = (VkBaseOutStructure *)pMemoryProperties->pNext; b; b = b->pNext) {
         if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) budget = (void *)b;
+        else only_budget = 0;
+    }
+    if (vkb_physdev_ready(pd) && (!pMemoryProperties->pNext || (budget && only_budget))) {
+        pMemoryProperties->memoryProperties = pd->client_mem;
+        if (!budget) return;
+
+        uint64_t now = vkb_physdev_now_ns();
+        pthread_mutex_lock(&pd->lock);
+        int fresh = pd->mem_budget_have && now - pd->mem_budget_ns < 500000000ull; /* 500 ms */
+        if (fresh) {
+            VkDeviceSize b[VK_MAX_MEMORY_HEAPS], u[VK_MAX_MEMORY_HEAPS];
+            memcpy(b, pd->mem_budget_srv, sizeof(b));
+            memcpy(u, pd->mem_usage_srv, sizeof(u));
+            pthread_mutex_unlock(&pd->lock);
+            vkb_physdev_apply_mem_budget(pd, budget, b, u);
+            return;
+        }
+        pthread_mutex_unlock(&pd->lock);
+
+        vkb_wire_vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
+        pMemoryProperties->memoryProperties = pd->client_mem;
+        pthread_mutex_lock(&pd->lock);
+        memcpy(pd->mem_budget_srv, budget->heapBudget, sizeof(pd->mem_budget_srv));
+        memcpy(pd->mem_usage_srv, budget->heapUsage, sizeof(pd->mem_usage_srv));
+        pd->mem_budget_ns = vkb_physdev_now_ns();
+        pd->mem_budget_have = 1;
+        VkDeviceSize b[VK_MAX_MEMORY_HEAPS], u[VK_MAX_MEMORY_HEAPS];
+        memcpy(b, pd->mem_budget_srv, sizeof(b));
+        memcpy(u, pd->mem_usage_srv, sizeof(u));
+        pthread_mutex_unlock(&pd->lock);
+        vkb_physdev_apply_mem_budget(pd, budget, b, u);
+        return;
+    }
+
     vkb_wire_vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
     if (!vkb_physdev_ready(pd)) return;
     pMemoryProperties->memoryProperties = pd->client_mem;
@@ -599,15 +658,7 @@ VKAPI_ATTR void VKAPI_CALL vkb_ep_vkGetPhysicalDeviceMemoryProperties2(VkPhysica
         VkDeviceSize b[VK_MAX_MEMORY_HEAPS], u[VK_MAX_MEMORY_HEAPS];
         memcpy(b, budget->heapBudget, sizeof(b));
         memcpy(u, budget->heapUsage, sizeof(u));
-        memset(budget->heapBudget, 0, sizeof(budget->heapBudget));
-        memset(budget->heapUsage, 0, sizeof(budget->heapUsage));
-        for (uint32_t h = 0; h < pd->client_mem.memoryHeapCount; h++) {
-            budget->heapBudget[h] = b[pd->heap_map[h]];
-            budget->heapUsage[h] = u[pd->heap_map[h]];
-            /* never more than the heap the app is shown (VKBRIDGE_HEAP_MAX_MB); the usage stays
-             * the real one, so over the cap reads as over budget */
-            if (budget->heapBudget[h] > pd->client_mem.memoryHeaps[h].size) budget->heapBudget[h] = pd->client_mem.memoryHeaps[h].size;
-        }
+        vkb_physdev_apply_mem_budget(pd, budget, b, u);
     }
 }
 
